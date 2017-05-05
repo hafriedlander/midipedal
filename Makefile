@@ -1,0 +1,10 @@
+BOARD_TAG = teensy31
+USB_TYPE = USB_MIDI_SERIAL
+
+ifndef ARDUINO_MAKEFILE_DIR
+	echo $(error "ARDUINO_MAKEFILE_DIR is not defined")
+endif
+
+include $(ARDUINO_MAKEFILE_DIR)/Teensy.mk
+
+CPPFLAGS += -DBOUNCE_WITH_PROMPT_DETECTION=1
