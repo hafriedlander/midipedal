@@ -3,6 +3,7 @@
 #include <Bounce2.h>
 #include <ADC.h>
 #include <elapsedMillis.h>
+#include <EEPROM.h>
 
 #include "./RunningMedian.h"
 
@@ -49,9 +50,11 @@ const char *inLabel[SWITCHCNT] = {"1", "2", "3", "4", "5", "6", "7", "8", "B", "
 int outMap[LEDCNT] = {16, 15, 14, 12, 8, 9, 11, 10, 17, 6, 7};
 const char *outLabel[LEDCNT] = {"1", "2", "3", "4", "5", "6", "7", "8", "C", "A", "B"};
 
-int switchMode[SWITCHCNT] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-int switchCount[SWITCHCNT] = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
-int switchState[SWITCHCNT] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+enum SwitchMode { SM_INSTANT = 0, SM_TOGGLE = 1 };
+
+uint8_t switchMode[SWITCHCNT] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+uint8_t switchCount[SWITCHCNT] = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
+uint8_t switchState[SWITCHCNT] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 
 void showLEDs(uint16_t v) {
 		for (uint8_t i = 0; i < LEDCNT; i++) {
@@ -131,29 +134,69 @@ Control<4> Control3;
 
 ADC *adc = new ADC(); // adc object
 
+int stateShow = -1;
+elapsedMillis stateShowTimer = 0;
+
+
+void resendAllNotes() {
+	for (uint8_t i = 0; i < SWITCHCNT; i++) {
+		if (switchMode[i] == SM_TOGGLE) {
+			usbMIDI.sendNoteOn(i * 12 + switchState[i], 127, MIDICHAN);
+			stateShow = 9;
+			stateShowTimer = 0;
+		}
+		else if (switchMode[i] == SM_INSTANT) {
+			if (!switches[i].read()) {
+				usbMIDI.sendNoteOn(i * 12, 127, MIDICHAN);
+			}
+			else {
+				usbMIDI.sendNoteOff(i * 12, 0, MIDICHAN);
+			}
+		}
+	}
+
+}
+
+void OnControlChange(byte channel, byte control, byte value) {
+	if (control == 120 || control == 121) {
+		resendAllNotes();
+		stateShow = 9;
+		stateShowTimer = 0;
+	}
+}
+
 void setup() {
 	Serial.begin(9600);
 
 	byte i;
 
 	for (i = 0; i < SWITCHCNT; i++) {
+		switchMode[i] = EEPROM.read(i);
+		if (switchMode[i] == 255) switchMode[i] = SM_INSTANT;
+
+		switchCount[i] = EEPROM.read(i + 20);
+		if (switchCount[i] == 255) switchCount[i] = 1;
+	}
+
+	for (i = 0; i < SWITCHCNT; i++) {
 		pinMode(inMap[i], INPUT_PULLUP);
 		switches[i].attach(inMap[i]);
-		switches[i].interval(5);
+		switches[i].interval((i == 0) ? 100 : 50); // Switch 0 is a bit more worn
 	}
 
-	for (i = 6; i <= 17; i++) {
-		pinMode(i, OUTPUT);
+	for (i = 0; i < LEDCNT; i++) {
+		pinMode(outMap[i], OUTPUT);
 	}
-
 
 	adc->setAveraging(32);
   adc->setResolution(10);
-	adc->setConversionSpeed(ADC_CONVERSION_SPEED::LOW_SPEED);
-	adc->setSamplingSpeed(ADC_SAMPLING_SPEED::LOW_SPEED);
+	adc->setConversionSpeed(ADC_CONVERSION_SPEED::HIGH_SPEED);
+	adc->setSamplingSpeed(ADC_SAMPLING_SPEED::HIGH_SPEED);
 
 	adc->enableInterrupts();
 	adc->startSingleRead(A10, ADC_0);
+
+	usbMIDI.setHandleControlChange(OnControlChange);
 }
 
 int j = 0;
@@ -187,6 +230,7 @@ void selectForProgram() {
 		switches[i].update();
 		if (switches[i].fell()) {
 			if (i == 10) {
+				resendAllNotes();
 				mode = NORMAL;
 			}
 			else {
@@ -199,6 +243,8 @@ void selectForProgram() {
 	if (modeElapsed > 10000) mode = NORMAL;
 }
 
+elapsedMillis eepromRateLimit = 0;
+
 void program() {
 	showLEDs(1 << programming | (0x200 << switchMode[programming]));
 
@@ -210,6 +256,14 @@ void program() {
 			}
 			else {
 				switchCount[programming] = i+1;
+
+				// Only write once every 500ms maximum
+				if (eepromRateLimit < 500) delay(500 - eepromRateLimit);
+				eepromRateLimit = 0;
+
+				EEPROM.write(programming, switchMode[programming]);
+				EEPROM.write(programming + 20, switchCount[programming]);
+
 				mode = DISPLAY_PROGRAM;
 				modeElapsed = 0;
 			}
@@ -235,21 +289,47 @@ void normal() {
 	for (i = 0; i < SWITCHCNT; i++) {
 		switches[i].update();
 		if (switches[i].fell()) {
-			if (switchMode[i] == 1) {
-				usbMIDI.sendNoteOff(i * 12 + switchState[i], 0, MIDICHAN);
-				switchState[i] = (switchState[i] + 1) % switchCount[i];
+			if (switchMode[i] == SM_TOGGLE) {
+				if (switchCount[i] > 1) {
+					usbMIDI.sendNoteOff(i * 12 + switchState[i], 0, MIDICHAN);
+					switchState[i] = (switchState[i] + 1) % switchCount[i];
+
+					stateShow = switchState[i]; stateShowTimer = 0;
+				}
+				else {
+					usbMIDI.sendNoteOff(i * 12 + switchState[i], 0, MIDICHAN);
+					switchState[i] = (switchState[i] + 1) % 2;
+				}
 			}
 			usbMIDI.sendNoteOn(i * 12 + switchState[i], 127, MIDICHAN);
 		}
 		else if (switches[i].rose()) {
-			if (switchMode[i] == 0) {
+			if (switchMode[i] == SM_INSTANT) {
 				usbMIDI.sendNoteOff(i * 12 + switchState[i], 0, MIDICHAN);
 				switchState[i] = (switchState[i] + 1) % switchCount[i];
 			}
 		}
 	}
 
-	showLEDs(0);
+	if (stateShow >= 0 && stateShowTimer < 1000) {
+		showLEDs(((stateShowTimer % 100) < 50) ? 0 : (1 << stateShow));
+	}
+	else {
+		uint16_t ledState = 0;
+
+		for (i = 0; i < SWITCHCNT; i++) {
+			if (switchMode[i] == SM_TOGGLE) {
+				if (switchCount[i] == 1 && switchState[i] == 0) {
+					ledState = ledState | (1 << i);
+				}
+			}
+		}
+
+		showLEDs(ledState);
+	}
+
+
+
 
 	Control1.send();
 	Control2.send();
