@@ -75,19 +75,29 @@ class Control {
 			if (val < min) min = val;
 			if (val > max) max = val;
 
+			uint32_t diff = max-min;
+			uint32_t theta = diff >> 7;
+
 			uint32_t t = val;
 			t -= (uint32_t)min;
+
+			// Fix tiny changes to max or min
+			if (t < theta) t = 0;
+			if (t > (diff - theta)) t = diff;
+
 			t *= (uint32_t)16383; // 14 bits
-			t /= (uint32_t)(max-min);
+			t /= diff;
+
+			t = 16383 - t; // Invert
 
 			data.add(t);
 		}
 
 		void send() {
 			if (enabled && data.getMedian(aval) == data.OK && aval != lastVal) {
-				lastVal = aval;
 
-				if (lastSent > 10) {
+				if (lastSent >= 2) {
+					lastVal = aval;
 					lastSent = 0;
 					usbMIDI.sendControlChange(CC, (aval >> 7) & 0x7F, MIDICHAN);
 					usbMIDI.sendControlChange(CC + 32, aval & 0x7F, MIDICHAN);
@@ -105,7 +115,7 @@ class Control {
 			uint16_t h, l;
 			data.getHighest(h);
 			data.getLowest(l);
-			if ((h - l) <= 127) enabled = true;
+			if ((h - l) == 0) enabled = true;
 		}
 
 		uint16_t val() {
@@ -188,7 +198,7 @@ void setup() {
 		pinMode(outMap[i], OUTPUT);
 	}
 
-	adc->setAveraging(32);
+	adc->setAveraging(16);
   adc->setResolution(10);
 	adc->setConversionSpeed(ADC_CONVERSION_SPEED::HIGH_SPEED);
 	adc->setSamplingSpeed(ADC_SAMPLING_SPEED::HIGH_SPEED);
